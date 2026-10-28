@@ -1,6 +1,6 @@
-'use client';
+﻿'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Header } from '@/components/Header';
 import { VideoProctor } from '@/components/VideoProctor';
@@ -23,11 +23,17 @@ import {
   Section,
   UserAnswer,
 } from '@/types/exam';
+import { saveViolation } from '@/lib/proctorDB';
 import { Shield } from 'lucide-react';
 
 export function ExamPlatform() {
   // Stage flow: 'onboarding' -> 'exam' -> 'submitted'
   const [stage, setStage] = useState<'onboarding' | 'exam' | 'submitted'>('onboarding');
+
+  // Unique session ID for this exam attempt — used to namespace IndexedDB records
+  const sessionIdRef = useRef<string>(
+    typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `session-${Date.now()}`
+  );
 
   const [candidate] = useState<CandidateInfo>(mockCandidate);
   const [sections] = useState<Section[]>(mockSections);
@@ -86,17 +92,24 @@ export function ExamPlatform() {
     fullscreenViolations: 0,
     integrityScore: 98,
     isAiScanning: true,
+    // Real detection fields
+    motionScore: 0,
+    voiceActivityDetected: false,
+    speechDetected: false,
+    motionViolationCount: 0,
+    noiseViolationCount: 0,
+    sessionId: sessionIdRef.current,
     logs: [
       {
         id: 'log-init-1',
-        timestamp: '10:00:00 AM',
+        timestamp: new Date().toLocaleTimeString(),
         type: 'success',
         message: 'Identity Verified: Photo biometric facial match 99.4%',
         confidence: 0.99,
       },
       {
         id: 'log-init-2',
-        timestamp: '10:00:02 AM',
+        timestamp: new Date().toLocaleTimeString(),
         type: 'info',
         message: 'Continuous AI Proctoring session activated. Neural models running.',
         confidence: 0.98,
@@ -151,11 +164,70 @@ export function ExamPlatform() {
           type: 'tab_switch',
           message: 'Browser focus was shifted away from the exam tab. Navigating outside is flagged as potential cheating.',
         });
+      } else {
+        // Candidate returned to tab - log return
+        setProctorState((prev) => ({
+          ...prev,
+          logs: [
+            {
+              id: `log-return-${Date.now()}`,
+              timestamp: new Date().toLocaleTimeString(),
+              type: 'warning',
+              message: 'Candidate returned to exam tab — focus loss interval recorded',
+              confidence: 0.99,
+            },
+            ...prev.logs.slice(0, 15),
+          ],
+        }));
       }
     };
 
+    // Block common tab-switch / navigation keyboard shortcuts
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (
+        (e.ctrlKey && (
+          e.key === 't' || e.key === 'T' ||
+          e.key === 'w' || e.key === 'W' ||
+          e.key === 'n' || e.key === 'N' ||
+          e.key === 'l' || e.key === 'L'
+        )) ||
+        e.key === 'F5'
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        setProctorState((prev) => ({
+          ...prev,
+          isSuspicious: true,
+          lastSuspicionReason: `Blocked shortcut: ${e.ctrlKey ? 'Ctrl+' : ''}${e.key}`,
+          logs: [
+            {
+              id: `log-key-${Date.now()}`,
+              timestamp: new Date().toLocaleTimeString(),
+              type: 'warning',
+              message: `Blocked navigation shortcut: ${e.ctrlKey ? 'Ctrl+' : ''}${e.key.toUpperCase()}`,
+              confidence: 0.99,
+            },
+            ...prev.logs.slice(0, 15),
+          ],
+        }));
+      }
+    };
+
+    // Warn before page navigation / tab close
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = 'Leaving this page will terminate your exam session and flag a security violation.';
+      return e.returnValue;
+    };
+
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
   }, [stage]);
 
   // Fullscreen exit detection listener
@@ -445,6 +517,9 @@ export function ExamPlatform() {
   }, [activeQuestionId, handleNext]);
 
   const handleRestartExam = () => {
+    // Generate fresh session ID for new attempt
+    sessionIdRef.current =
+      typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `session-${Date.now()}`;
     setStage('onboarding');
     setRemainingSeconds(5400);
     setActiveSectionId('sec-1');
@@ -469,6 +544,12 @@ export function ExamPlatform() {
       fullscreenViolations: 0,
       integrityScore: 98,
       isSuspicious: false,
+      motionViolationCount: 0,
+      noiseViolationCount: 0,
+      motionScore: 0,
+      voiceActivityDetected: false,
+      speechDetected: false,
+      sessionId: sessionIdRef.current,
       logs: [
         {
           id: `log-${Date.now()}`,
@@ -560,7 +641,19 @@ export function ExamPlatform() {
           <VideoProctor
             proctorState={proctorState}
             onUpdateProctorState={setProctorState}
+            sessionId={sessionIdRef.current}
             onTriggerViolation={(type, message) => {
+              // Persist violation to IndexedDB
+              saveViolation({
+                id: `viol-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                sessionId: sessionIdRef.current,
+                timestamp: new Date().toISOString(),
+                type,
+                message,
+                confidence: 0.92,
+                integrityScoreAtEvent: proctorState.integrityScore,
+              }).catch(console.warn);
+
               setViolationState({
                 isOpen: true,
                 type,
@@ -612,8 +705,13 @@ export function ExamPlatform() {
         isOpen={violationState.isOpen}
         type={violationState.type}
         message={violationState.message}
-        violationCount={proctorState.tabSwitchCount + proctorState.fullscreenViolations}
-        maxViolations={3}
+        violationCount={
+          proctorState.tabSwitchCount +
+          proctorState.fullscreenViolations +
+          proctorState.motionViolationCount +
+          proctorState.noiseViolationCount
+        }
+        maxViolations={5}
         onAcknowledge={() => {
           setViolationState((p) => ({ ...p, isOpen: false }));
           if (violationState.type === 'fullscreen_exit') {

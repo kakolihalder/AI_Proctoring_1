@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import confetti from 'canvas-confetti';
 import {
@@ -19,8 +19,12 @@ import {
   Hash,
   ChevronRight,
   TrendingUp,
+  Activity,
+  Mic,
+  PersonStanding,
 } from 'lucide-react';
 import { CandidateInfo, ProctorLogEntry, ProctorState, Question, Section, UserAnswer } from '@/types/exam';
+import { getSessionViolations, ViolationRecord } from '@/lib/proctorDB';
 
 interface SubmissionSummaryProps {
   candidate: CandidateInfo;
@@ -39,8 +43,19 @@ export const SubmissionSummary: React.FC<SubmissionSummaryProps> = ({
   proctorState,
   onRestartExam,
 }) => {
+  const [dbViolations, setDbViolations] = useState<ViolationRecord[]>([]);
+
+  // Load persisted violations from IndexedDB
   useEffect(() => {
-    // Fire festive confetti upon successful submission
+    if (proctorState.sessionId) {
+      getSessionViolations(proctorState.sessionId)
+        .then((recs) => setDbViolations(recs.sort((a, b) => a.timestamp.localeCompare(b.timestamp))))
+        .catch(console.warn);
+    }
+  }, [proctorState.sessionId]);
+
+  // Fire festive confetti upon successful submission
+  useEffect(() => {
     const duration = 2.5 * 1000;
     const end = Date.now() + duration;
 
@@ -66,6 +81,7 @@ export const SubmissionSummary: React.FC<SubmissionSummaryProps> = ({
     };
     frame();
   }, []);
+
 
   // Calculate score estimate
   let totalScore = 0;
@@ -112,8 +128,17 @@ export const SubmissionSummary: React.FC<SubmissionSummaryProps> = ({
   const percentageScore = Math.round((totalScore / (maxPossibleScore || 1)) * 100);
   const integrityScore = Math.max(70, Math.min(100, proctorState.integrityScore));
   const isIntegrityPassed = integrityScore >= 80;
+  const totalViolations =
+    proctorState.tabSwitchCount +
+    proctorState.fullscreenViolations +
+    proctorState.motionViolationCount +
+    proctorState.noiseViolationCount;
 
   const handleDownloadReceipt = () => {
+    const violationLines = dbViolations.length > 0
+      ? dbViolations.map((v) => `  [${new Date(v.timestamp).toLocaleTimeString()}] ${v.type.toUpperCase()}: ${v.message}`).join('\n')
+      : '  No violations recorded.';
+
     const receiptData = `
 =====================================================
 AI PROCTORING SYSTEM - OFFICIAL EXAM SUBMISSION RECEIPT
@@ -123,6 +148,7 @@ Exam Code:        ${candidate.examCode}
 Candidate:        ${candidate.name}
 Roll Number:      ${candidate.rollNumber}
 Candidate ID:     ${candidate.candidateId}
+Session ID:       ${proctorState.sessionId}
 Submission Time:  ${new Date().toLocaleString()}
 Submission Token: SEC-REC-${Math.random().toString(36).substring(2, 9).toUpperCase()}
 
@@ -134,10 +160,13 @@ PERFORMANCE SUMMARY:
 
 AI PROCTORING INTEGRITY AUDIT:
 - Final Integrity Score: ${integrityScore}% (${isIntegrityPassed ? 'VERIFIED PASSED' : 'FLAGGED FOR MANUAL REVIEW'})
-- Tab Switch Violations: ${proctorState.tabSwitchCount}
-- Continuous Face Presence: 99.4%
-- Gaze Alignment Index: 96.8%
-- Background Noise Incidents: ${proctorState.logs.filter((l: ProctorLogEntry) => l.type === 'warning').length}
+- Total Violations: ${totalViolations}
+  - Tab Switch: ${proctorState.tabSwitchCount}
+  - Fullscreen Exits: ${proctorState.fullscreenViolations}
+  - Motion Violations: ${proctorState.motionViolationCount}
+  - Noise/Voice Violations: ${proctorState.noiseViolationCount}
+- IndexedDB Violation Log (${dbViolations.length} records):
+${violationLines}
 =====================================================
 This receipt is cryptographically sealed for institutional audit.
 `;
@@ -295,23 +324,37 @@ This receipt is cryptographically sealed for institutional audit.
                 <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between">
                   <div className="flex items-center gap-2.5 text-slate-700 font-medium">
                     <Eye className="w-4 h-4 text-indigo-600" />
-                    <span>Gaze Tracking & Face Presence</span>
+                    <span>Gaze Tracking &amp; Face Presence</span>
                   </div>
-                  <span className="font-mono font-bold text-emerald-700">99.2% Nominal</span>
+                  <span className={`font-mono font-bold ${proctorState.faceDetected ? 'text-emerald-700' : 'text-rose-600'}`}>
+                    {proctorState.faceDetected ? '99.2% Nominal' : 'Violations Flagged'}
+                  </span>
                 </div>
 
                 <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between">
                   <div className="flex items-center gap-2.5 text-slate-700 font-medium">
-                    <Volume2 className="w-4 h-4 text-purple-600" />
-                    <span>Acoustic Environment Stability</span>
+                    <Mic className="w-4 h-4 text-purple-600" />
+                    <span>Voice / Noise Violations</span>
                   </div>
-                  <span className="font-mono font-bold text-emerald-700">Low Noise</span>
+                  <span className={`font-mono font-bold ${proctorState.noiseViolationCount === 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
+                    {proctorState.noiseViolationCount} Incident(s)
+                  </span>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between">
+                  <div className="flex items-center gap-2.5 text-slate-700 font-medium">
+                    <Activity className="w-4 h-4 text-orange-500" />
+                    <span>Motion Anomaly Violations</span>
+                  </div>
+                  <span className={`font-mono font-bold ${proctorState.motionViolationCount === 0 ? 'text-emerald-700' : 'text-amber-600'}`}>
+                    {proctorState.motionViolationCount} Incident(s)
+                  </span>
                 </div>
 
                 <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between">
                   <div className="flex items-center gap-2.5 text-slate-700 font-medium">
                     <AlertTriangle className="w-4 h-4 text-amber-500" />
-                    <span>Tab Switch & Focus Lost</span>
+                    <span>Tab Switch &amp; Focus Lost</span>
                   </div>
                   <span className={`font-mono font-bold ${proctorState.tabSwitchCount === 0 ? 'text-emerald-700' : 'text-amber-600'}`}>
                     {proctorState.tabSwitchCount} Incident(s)
@@ -321,19 +364,84 @@ This receipt is cryptographically sealed for institutional audit.
                 <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between">
                   <div className="flex items-center gap-2.5 text-slate-700 font-medium">
                     <Video className="w-4 h-4 text-emerald-600" />
-                    <span>Hardware Feed Continuous Stream</span>
+                    <span>Hardware Feed Stream</span>
                   </div>
                   <span className="font-mono font-bold text-emerald-700">100% Uninterrupted</span>
                 </div>
               </div>
             </div>
 
-            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-600" />
-              <span className="font-medium">AI Proctor status: No critical malpractice observed. Session validated.</span>
+            <div className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
+              isIntegrityPassed && totalViolations === 0
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : 'bg-amber-50 border-amber-200 text-amber-800'
+            }`}>
+              <ShieldCheck className={`w-4 h-4 shrink-0 ${isIntegrityPassed && totalViolations === 0 ? 'text-emerald-600' : 'text-amber-600'}`} />
+              <span className="font-medium">
+                {isIntegrityPassed && totalViolations === 0
+                  ? 'AI Proctor status: No critical malpractice observed. Session validated.'
+                  : `Session flagged: ${totalViolations} violation(s) recorded. Pending manual review.`}
+              </span>
             </div>
           </motion.div>
         </div>
+
+        {/* Violation Event Log from IndexedDB */}
+        {dbViolations.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.3 }}
+            className="bg-white border border-rose-200 rounded-3xl p-6 shadow-xs"
+          >
+            <div className="flex items-center gap-2.5 pb-4 border-b border-slate-200 mb-4">
+              <div className="p-2 rounded-xl bg-rose-50 text-rose-600 border border-rose-100">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="font-bold text-sm text-slate-900">Violation Event Log</h2>
+                <p className="text-[11px] text-slate-500">{dbViolations.length} event(s) recorded to IndexedDB during this session</p>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                    <th className="pb-2 pr-4 font-bold">#</th>
+                    <th className="pb-2 pr-4 font-bold">Time</th>
+                    <th className="pb-2 pr-4 font-bold">Type</th>
+                    <th className="pb-2 pr-4 font-bold w-full">Description</th>
+                    <th className="pb-2 font-bold">Integrity</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {dbViolations.map((v, i) => (
+                    <tr key={v.id} className="text-slate-600">
+                      <td className="py-2 pr-4 text-slate-400 font-mono">{i + 1}</td>
+                      <td className="py-2 pr-4 font-mono text-slate-500 whitespace-nowrap">
+                        {new Date(v.timestamp).toLocaleTimeString()}
+                      </td>
+                      <td className="py-2 pr-4">
+                        <span className={`px-2 py-0.5 rounded-full font-bold uppercase text-[9px] whitespace-nowrap ${
+                          v.type === 'multiple_face' || v.type === 'face_missing'
+                            ? 'bg-rose-100 text-rose-700'
+                            : 'bg-amber-100 text-amber-700'
+                        }`}>
+                          {v.type.replace('_', ' ')}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-4 text-slate-600 leading-snug">{v.message}</td>
+                      <td className="py-2 font-mono font-bold text-rose-600 whitespace-nowrap">
+                        {v.integrityScoreAtEvent}%
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </motion.div>
+        )}
 
         {/* Action Buttons */}
         <motion.div

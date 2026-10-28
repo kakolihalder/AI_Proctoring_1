@@ -62,7 +62,7 @@ export interface ProctorState {
   faceCount: number;
   gazeDirection: 'center' | 'left' | 'right' | 'up' | 'down' | 'away';
   gazeConfidence: number;
-  micVolume: number; // 0-100
+  micVolume: number; // 0-100 (real RMS from Web Audio API)
   ambientNoiseLevel: 'low' | 'moderate' | 'high';
   isSuspicious: boolean;
   lastSuspicionReason?: string;
@@ -71,6 +71,23 @@ export interface ProctorState {
   integrityScore: number; // 0-100
   logs: ProctorLogEntry[];
   isAiScanning: boolean;
+  // Real detection fields
+  motionScore: number; // 0-100, canvas pixel-diff based
+  voiceActivityDetected: boolean; // true when noise exceeds threshold
+  speechDetected: boolean; // true when sustained speech detected
+  motionViolationCount: number;
+  noiseViolationCount: number;
+  sessionId: string; // unique per exam session for IndexedDB isolation
+}
+
+export interface ViolationRecord {
+  id: string;
+  sessionId: string;
+  timestamp: string;
+  type: string;
+  message: string;
+  confidence: number;
+  integrityScoreAtEvent: number;
 }
 
 export interface CandidateInfo {
